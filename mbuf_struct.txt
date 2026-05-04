@@ -1,0 +1,73 @@
+struct rte_mbuf
+├─ void *buf_addr                     // Virtual address of segment buffer
+├─ buf_iova / next                    // Physical address of buffer (RTE_IOVA_IN_MBUF=1) OR
+│                                     // Next segment pointer (RTE_IOVA_IN_MBUF=0)
+├─ union {
+│    ├─ uint64_t rearm_data[1]        // Initialized on Rx descriptor rearm
+│    └─ struct {
+│         ├─ uint16_t data_off        // Offset where packet data starts
+│         ├─ RTE_ATOMIC(uint16_t) refcnt  // Reference count
+│         ├─ uint16_t nb_segs         // Number of segments in mbuf chain
+│         └─ uint16_t port            // Input port (or output port for Tx adapter)
+│       }
+│  }
+├─ uint64_t ol_flags                   // Offload flags (checksum, VLAN, etc.)
+├─ union {
+│    ├─ void *rx_descriptor_fields1[24 / sizeof(void *)]
+│    └─ struct {
+│         ├─ union {
+│         │    ├─ uint32_t packet_type
+│         │    └─ struct {
+│         │         ├─ uint8_t l2_type:4
+│         │         ├─ uint8_t l3_type:4
+│         │         ├─ uint8_t l4_type:4
+│         │         ├─ uint8_t tun_type:4
+│         │         └─ union {
+│         │              ├─ uint8_t inner_esp_next_proto
+│         │              └─ struct {
+│         │                   ├─ uint8_t inner_l2_type:4
+│         │                   └─ uint8_t inner_l3_type:4
+│         │                 }
+│         │           }
+│         │         └─ uint8_t inner_l4_type:4
+│         │       }
+│         ├─ uint32_t pkt_len           // Total packet length (all segments)
+│         ├─ uint16_t data_len          // Data length in this segment
+│         ├─ uint16_t vlan_tci          // VLAN TCI
+│         ├─ union {
+│         │    ├─ uint32_t rss
+│         │    └─ struct fdir {
+│         │         ├─ union {
+│         │         │    ├─ struct { uint16_t hash; uint16_t id; }
+│         │         │    └─ uint32_t lo
+│         │         │  }
+│         │         └─ uint32_t hi
+│         │       } fdir
+│         │    ├─ struct rte_mbuf_sched sched
+│         │    ├─ struct txadapter { uint32_t reserved1; uint16_t reserved2; uint16_t txq; }
+│         │    └─ uint32_t usr
+│         │  } hash
+│         ├─ uint16_t vlan_tci_outer
+│         └─ uint16_t buf_len            // Length of segment buffer
+│       }
+│  }
+├─ struct rte_mempool *pool            // Pool from which mbuf was allocated
+├─ next / dynfield2                     // Second cache line: next segment or reserved field
+├─ union {
+│    ├─ uint64_t tx_offload
+│    └─ struct {
+│         ├─ l2_len : RTE_MBUF_L2_LEN_BITS
+│         ├─ l3_len : RTE_MBUF_L3_LEN_BITS
+│         ├─ l4_len : RTE_MBUF_L4_LEN_BITS
+│         ├─ tso_segsz : RTE_MBUF_TSO_SEGSZ_BITS
+│         ├─ outer_l3_len : RTE_MBUF_OUTL3_LEN_BITS
+│         └─ outer_l2_len : RTE_MBUF_OUTL2_LEN_BITS
+│       }
+│  }
+├─ struct rte_mbuf_ext_shared_info *shinfo  // Shared info for external buffers
+├─ uint16_t priv_size                  // Application private data size
+├─ uint16_t timesync                    // Timesync flags (IEEE1588)
+└─ uint32_t dynfield1[9]               // Reserved for dynamic fields
+
+
+	
