@@ -1,0 +1,134 @@
+What DPDK does differently (this is the KEY)
+===========================================
+
+DPDK throws away everything that causes overhead.
+
+
+1. No interrupts (polling instead)
+----------------------------------
+
+Kernel:
+
+  interrupt -> context switch -> softirq
+
+
+DPDK:
+
+  while (1) {
+      poll NIC RX queue
+  }
+
+
+Why faster:
+
+  No interrupt overhead
+  No scheduler involvement
+  CPU cache stays hot
+
+
+2. No sk_buff allocation per packet
+-----------------------------------
+
+Kernel:
+
+  alloc sk_buff
+  free sk_buff
+
+  (per packet)
+
+
+DPDK:
+
+  pre-allocated mbuf from mempool
+  reuse forever
+
+
+Why faster:
+
+  No per-packet allocation
+  No slab allocator
+  No locks
+
+
+3. Zero-copy packet handling
+----------------------------
+
+Kernel:
+
+  Packet copied multiple times
+
+
+DPDK:
+
+  NIC DMA -> user-space buffer -> processing
+
+
+Why faster:
+
+  Memory bandwidth saved
+  Cache efficiency
+
+
+4. No context switches
+----------------------
+
+Kernel:
+
+  kernel -> user -> kernel -> user
+
+
+DPDK:
+
+  user space only
+
+
+Why faster:
+
+  No mode switches
+  No TLB flushes
+
+
+5. No general-purpose protocol stack
+------------------------------------
+
+Kernel:
+
+  Full TCP/IP
+  Netfilter
+  Routing
+  Conntrack
+
+
+DPDK:
+
+  You decide what to parse
+  Often only L2/L3/L4 headers
+
+
+Why faster:
+
+  Less work per packet
+  Predictable execution path
+
+
+6. Core ownership model
+-----------------------
+
+Kernel:
+
+  CPUs are shared
+  Preemptive scheduling
+
+
+DPDK:
+
+  One lcore = one packet pipeline
+  No preemption
+
+
+Why faster:
+
+  No locks
+  No contention
+  Deterministic latency
+
