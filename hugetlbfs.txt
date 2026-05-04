@@ -1,0 +1,161 @@
+ 
+ 
+ Huge Translation Lookaside Buffer File System(hugetlbfs)
+================================================================
+
+
+
+hugetlbfs is a special virtual filesystem in Linux used to
+expose pre-allocated hugepages to user-space processes.
+
+DPDK uses hugetlbfs to map hugepages into its address space.
+
+
+1) Why hugetlbfs exists
+-----------------------
+
+Hugepages are reserved at boot or runtime.
+But user-space needs a way to:
+  - Access them
+  - Map them
+  - Share them across processes
+
+hugetlbfs provides that mechanism.
+
+Without hugetlbfs:
+
+Hugepages exist
+But applications cannot map them easily
+
+
+2) What hugetlbfs actually is
+-----------------------------
+
+hugetlbfs is:
+  - NOT a disk filesystem
+  - NOT persistent storage
+  - NOT backed by block devices
+
+It is:
+  - An in-memory filesystem
+  - Backed directly by hugepages
+  - Exposed via mount points
+
+Example mount:
+
+/mnt/huge
+/dev/hugepages
+
+
+3) How hugetlbfs works internally
+---------------------------------
+
+Each file in hugetlbfs:
+  - Represents one or more hugepages
+  - Is physically contiguous
+  - Is pinned (non-swappable)
+  - Has a fixed hugepage size
+
+Operations:
+
+open()   -> reserve hugepages
+mmap()   -> map hugepages into user space
+unlink() -> release hugepages
+
+
+4) hugetlbfs and DPDK (critical link)
+-------------------------------------
+
+DPDK does NOT allocate hugepages itself.
+The kernel does.
+
+DPDK:
+  - Discovers hugepages
+  - Maps them via hugetlbfs
+  - Builds its memory subsystem on top
+
+Flow:
+
+Kernel reserves hugepages
+     |
+     v
+hugetlbfs exposes them
+     |
+     v
+DPDK EAL maps them
+     |
+     v
+DPDK creates memseg / memzone / mempool
+
+
+5) Where hugetlbfs is used in DPDK startup
+------------------------------------------
+
+rte_eal_init()
+ |
+ v
+scan /sys/kernel/mm/hugepages
+ |
+ v
+find hugetlbfs mount points
+ |
+ v
+open hugetlbfs files
+ |
+ v
+mmap hugepages
+ |
+ v
+create rte_memseg structures
+
+If hugetlbfs is missing:
+
+EAL: No available hugepages reported
+
+
+6) hugetlbfs vs malloc()
+------------------------
+
+malloc():
+  - Uses normal pages (4 KB)
+  - Swappable
+  - Fragmented
+  - Not DMA-safe
+
+hugetlbfs:
+  - Uses hugepages
+  - Pinned in RAM
+  - Physically contiguous
+  - DMA-safe
+
+
+7) hugetlbfs vs Transparent Huge Pages (THP)
+--------------------------------------------
+
+THP:
+  - Automatic
+  - Can be split
+  - Can be swapped
+  - Not DMA-safe
+  - NOT used by DPDK
+
+hugetlbfs:
+  - Explicit
+  - Fixed size
+  - Non-swappable
+  - DMA-safe
+  - REQUIRED by DPDK
+
+
+8) NUMA and hugetlbfs
+---------------------
+
+hugetlbfs is NUMA-aware.
+
+Hugepages are reserved per NUMA node:
+  /sys/devices/system/node/nodeX/hugepages/
+
+DPDK:
+  - Allocates memory local to NIC NUMA node
+  - Reduces cross-socket access
+

@@ -1,0 +1,57 @@
+1) Memory basics (why pages exist)
+---------------------------------
+Linux manages memory in pages.
+
+Default page size (x86_64):
+  - 4 KB
+
+Virtual memory to physical memory mapping is done using:
+  - Page tables
+  - Cached in CPU TLB (Translation Lookaside Buffer)
+
+Each memory access requires:
+  Virtual Address -> TLB lookup -> Physical Address
+
+
+2) Problem: Why normal (4 KB) pages are BAD for DPDK
+----------------------------------------------------
+DPDK applications:
+  - Process millions of packets per second
+  - Touch large contiguous memory regions
+  - Run in user space (bypass kernel networking stack)
+  - Use polling instead of interrupts
+
+With 4 KB pages:
+  - 1 GB memory = 262,144 pages
+  - Each page needs a TLB entry
+  - TLB misses increase drastically
+  - CPU stalls frequently
+  - Cache and memory latency increases
+  - DMA buffers become fragmented
+
+Result:
+  Packet drops
+  Jitter
+  Poor throughput
+
+
+3) What are Hugepages?
+---------------------
+Hugepages are memory pages larger than 4 KB.
+
+Typical hugepage sizes:
+
+  Architecture : Hugepage size
+  --------------------------------
+  x86_64       : 2 MB, 1 GB
+  ARM64        : 2 MB, 512 MB, 1 GB
+
+Example:
+  - 1 GB using 4 KB pages  -> 262,144 pages
+  - 1 GB using 2 MB pages  -> 512 pages
+  - 1 GB using 1 GB page   -> 1 page
+
+Benefits:
+  - Massive reduction in page table entries
+  - Far fewer TLB misses
+
