@@ -1,0 +1,157 @@
+| Member         | Type                                                                | Purpose                                               |
+| -------------- | ------------------------------------------------------------------- | ---------------------------------------- ----------|
+| `name`         | `const char *`                                                      | Name of the mempool handler (used in `set_ops_byname`)|
+| `alloc`        | `int (*)(struct rte_mempool *mp)`                               b   |Called when mempool is created,allocates mem for all obj
+| `free`         | `void (*)(struct rte_mempool *mp)`                                  | Called when mempool is freed,releases all allocated mem
+| `get`          | `int (*)(struct rte_mempool *mp, void **obj_p)`                     | Allocate **one object** from the mempool              |
+| `put`          | `void (*)(struct rte_mempool *mp, void *obj)`                       | Return **one object** back to the mempool             |
+| `get_bulk`     | `int (*)(struct rte_mempool *mp, void **obj_table, unsigned int n)` | Allocate **multiple objects** at once                 |
+| `put_bulk`     | `int (*)(struct rte_mempool *mp, void **obj_table, unsigned int n)` | Free **multiple objects** at once                     |
+| `enqueue_bulk` | `int (*)(struct rte_mempool *mp, void **obj_table, unsigned int n)` |Optional:enqueue multiple objects for ring-based mempool
+| `dequeue_bulk` | `int (*)(struct rte_mempool *mp, void **obj_table, unsigned int n)` |Optional:dequeue multiple objects for ring-based mempool
+| `opaque`       | `void *`                                                            | Optional: private data for this mempool ops instance    |
+
+
+1️⃣ Legacy API: rte_mempool_create()
+======================================
+
+    Old DPDK API (pre-17.x era)
+
+    Only ring-based mempool was supported by default
+
+    Memory allocation strategy was fixed:
+        - alloc → internal hugepages / memzones
+        - get / put → ring-based
+
+    Limited flexibility:
+        - Couldn’t easily plug in hardware memory
+        - Couldn’t change allocation strategy
+        - Couldn’t define custom object initialization easily
+
+    Example:
+        mp = rte_mempool_create("mypool", n, size, cache_size, priv_size,
+                                init_cb, init_arg, socket_id)
+
+    Always uses the default ring-based handler internally
+
+    No way to swap the backend (alloc/free) without changing DPDK itself
+
+
+2️⃣ Modern API: rte_mempool_create_empty()
+=================================================
+
+    Introduced for flexibility and extensibility
+
+    Separates the creation of mempool structure from the allocation strategy
+
+    Steps:
+        1. Create empty mempool → mempool exists, no memory allocated
+        2. Assign custom handler (ops) → can now define alloc/free/get/put behavior
+        3. Memory allocated using your ops → supports any backend
+
+    Advantages:
+        - Custom memory backends (hardware, FPGA, NUMA-aware)
+        - Custom allocation policies (alignment, zero-copy, DMA)
+        - Multiple handlers in the same application
+        - Legacy API still works → backward compatible
+        - mbufs can use alternative handlers via RTE_MBUF_DEFAULT_MEMPOOL_OPS
+        
+        
+        
+        
+3.Steps: 
+===============
+
+	1) Define our mempool struct : 
+	
+   
+	  		 example: 
+				   static struct rte_mempool_ops my_mempool_ops = {
+					.name = "my_custom_ops",
+					.alloc = my_alloc_function,
+					.free = my_free_function,
+					.get = my_get_function,
+					.put = my_put_function,
+					.get_bulk = my_get_bulk_function,
+					.put_bulk = my_put_bulk_function,
+					.enqueue_bulk = my_enqueue_bulk_function, // optional
+					.dequeue_bulk = my_dequeue_bulk_function, // optional
+					.opaque = NULL,
+					};
+
+    
+    2) Register this ops: 
+    		
+    			RTE_MEMPOOL_REGISTER_OPS(my_mempool_ops);
+    			
+    			
+    3) Then we call : 
+    
+			mp = rte_mempool_create_empty(...);			
+					
+		    rte_mempool_set_ops_byname(mp, "my_custom_ops", socket_id);
+
+		Creates a mempool structure without allocating memory or defining allocation/free logic yet.
+		The structure that keeps all the mempool metadata: number of objects, object size, cache size, socket, private data size, etc.
+		But it does NOT allocate memory for the objects themselves.
+		It separates mempool creation from memory management, allowing us to later assign a custom handler
+		
+		
+		
+4.  -d EAL option
+=====================
+
+1️⃣ What the -d EAL option does
+
+    -d tells DPDK to load a shared library dynamically at runtime
+
+    In this context, the shared library contains a mempool handler
+    (a custom mempool ops implementation)
+
+    Example:
+
+        ./my_dpdk_app -c 0x3 -n 4 -d /path/to/my_mempool_handler.so
+
+    Here:
+        - DPDK dynamically loads the mempool handler from the shared object
+        - The handler registers its mempool ops during load time
+
+    Benefit:
+        - Allows adding custom memory backends
+        - No need to recompile the DPDK application
+        - Handlers can be plugged in at runtime
+
+
+2️⃣ Why order matters in multi-process applications
+
+    DPDK often runs in multi-process mode:
+        - Primary process
+        - One or more secondary processes
+
+    Each process must load mempool handlers in the SAME order
+
+    Example:
+
+        Primary process:
+            ./dpdk_app -c 0x3 -n 4 -d handler1.so -d handler2.so
+
+        Secondary process:
+            ./dpdk_app -c 0x3 -n 4 -d handler1.so -d handler2.so
+
+    If the order of -d arguments differs:
+
+        - Shared memory structures (mempools, rings) may reference
+          the wrong mempool ops
+        - Handler indices will not match across processes
+        - Results in:
+            - Allocation failures
+            - Crashes
+            - Inconsistent or undefined behavior
+
+    Rule:
+
+        Always specify -d arguments in the EXACT SAME ORDER
+        for all processes when using shared libraries
+
+
+

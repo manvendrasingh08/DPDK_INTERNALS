@@ -1,0 +1,56 @@
+# Why per-core caches exist
+
+# Instead of one global cache shared by all cores (which would require CAS/locks for every access), DPDK creates a per-core cache.
+
+# This cache is static in size: RTE_MEMPOOL_CACHE_MAX_SIZE.
+
+# Each lcore gets its own cache during mempool creation.
+
+# --------------------------------------------------
+
+# 2️⃣ What the per-core cache stores
+
+# The cache stores pointers to free objects only.
+
+# Already allocated objects that the application is using are never touched.
+
+# The global ring also stores free object pointers.
+
+# --------------------------------------------------
+
+# 3️⃣ How allocation works
+
+# Core requests an object:
+
+# If the per-core cache is not empty, it pops a pointer from the cache → fast, lockless.
+
+# If the cache is empty, the core fetches multiple free pointers in bulk from the global ring → refill cache → pop one object for immediate use.
+
+# Only free objects are ever moved between cache and global ring.
+
+# Objects already in use are safe.
+
+# --------------------------------------------------
+
+# 4️⃣ Freeing objects
+
+# Freed objects are pushed back into the per-core cache → fast, lockless.
+
+# If the cache is full, some objects are returned in bulk to the global ring.
+
+# --------------------------------------------------
+
+# 5️⃣ External caches
+
+# Internal caches are per-lcore → only usable by EAL-managed threads.
+
+# Non-EAL threads (e.g., CLI, control-plane, debugging, tracing, policy updates) cannot use internal caches.
+
+# For them, DPDK provides external caches:
+
+# Created via rte_mempool_cache_create()
+
+# Freed via rte_mempool_cache_free()
+
+# These caches store free object pointers for non-lcore threads, allowing them to allocate and free objects efficiently without contending with the global ring.
+

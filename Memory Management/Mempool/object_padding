@@ -1,0 +1,150 @@
+DPDK EAL Memory Padding & Channel/Rank Interleaving
+==================================================
+
+1) Problem EAL is solving
+------------------------
+
+Modern CPUs:
+- Have multiple memory channels
+- Each channel has limited bandwidth
+- Accessing the same channel repeatedly creates contention
+
+DPDK workload:
+- Touches first ~64 bytes of many packet buffers
+- Happens at very high rate (millions of packets/sec)
+- Small inefficiencies = big performance loss
+
+If many buffers start at addresses that map to:
+- same channel
+- same rank
+
+Then:
+- memory controller serializes access
+- stalls occur
+- lower throughput is observed
+
+
+2) How CPU decides channel / rank (address bits)
+------------------------------------------------
+
+Physical address bits are used by the memory controller to select:
+- channel
+- DIMM
+- rank
+- bank
+
+Simplified physical address layout:
+
+| ... | CH bits | RANK bits | BANK bits | OFFSET |
+
+Example mapping:
+- bits 6–7   → channel
+- bits 8–9   → rank
+- bits 10–12 → bank
+
+So addresses map like this:
+
+Address 0x1000 → Channel 0, Rank 0
+Address 0x1040 → Channel 1, Rank 0
+Address 0x1080 → Channel 2, Rank 0
+Address 0x10C0 → Channel 3, Rank 0
+
+Important:
+Addresses are INTERLEAVED, not contiguous per channel
+
+
+3) What happens WITHOUT EAL padding
+-----------------------------------
+
+mbuf size = 2048 bytes
+mbufs allocated back-to-back
+
+mbuf0 → address A
+mbuf1 → address A + 2048
+mbuf2 → address A + 4096
+
+If channel bits don’t change:
+
+mbuf0 → Channel 0
+mbuf1 → Channel 0
+mbuf2 → Channel 0
+
+Result:
+All packet headers hit the same channel
+→ channel saturation
+→ memory bottleneck
+
+
+4) What EAL does (THIS IS THE KEY)
+---------------------------------
+
+EAL knows:
+- number of memory channels
+- number of ranks
+- cache line size
+
+Using this information, EAL:
+- adds padding between objects
+- intentionally shifts start addresses
+
+Instead of:
+
+mbuf0 @ A
+mbuf1 @ A + 2048
+mbuf2 @ A + 4096
+
+EAL forces:
+
+mbuf0 @ A            → Channel 0, Rank 0
+mbuf1 @ A + padding  → Channel 1, Rank 0
+mbuf2 @ A + padding  → Channel 2, Rank 0
+mbuf3 @ A + padding  → Channel 3, Rank 1
+
+
+5) What “padding” actually means
+--------------------------------
+
+Padding = unused bytes inserted so that
+address bits used for channel and rank selection change
+
+Padding size is chosen so that:
+- channel bits flip
+- rank bits flip
+
+This is intentional address manipulation, not random
+
+
+6) Resulting memory access pattern
+----------------------------------
+
+Packet burst processing:
+
+Core 0 → mbuf → Channel 0
+Core 1 → mbuf → Channel 1
+Core 2 → mbuf → Channel 2
+Core 3 → mbuf → Channel 3
+
+Now:
+- multiple channels are active in parallel
+- no serialization occurs
+- full memory bandwidth is utilized
+
+
+7) Why this matters for packet processing
+-----------------------------------------
+
+DPDK packet path:
+- RX burst
+- parse L2/L3/L4 headers
+- forwarding decision
+
+Only the first ~64 bytes are accessed heavily
+
+If those 64 bytes are:
+- spread across different channels and ranks
+
+Then:
+- parallel DRAM access
+- lower latency
+- higher packets-per-second (PPS)
+

@@ -1,0 +1,132 @@
+1️⃣ What is DRAM?
+-----------------
+
+DRAM = Dynamic Random Access Memory
+
+- DRAM is the actual memory technology
+- It is made of tiny memory cells
+- Each cell stores 1 bit using:
+  - a capacitor (charge = 1 / no charge = 0)
+  - a transistor
+- DRAM cells must be refreshed periodically, hence “dynamic”
+
+So:
+
+  DRAM is the memory itself
+
+Think of DRAM as:
+- individual memory cells and chips that store bits
+
+
+2️⃣ What is a DRAM chip?
+------------------------
+
+- A DRAM chip is a small black IC on a RAM stick
+- Each chip contains millions/billions of DRAM cells
+- One chip typically provides:
+  - 4-bit, 8-bit, or 16-bit data width
+
+Example:
+- x8 DRAM chip → outputs 8 bits per access
+
+So:
+
+  A DRAM chip is a piece of silicon implementing DRAM cells
+
+
+3️⃣ What is a DIMM?
+-------------------
+
+DIMM = Dual Inline Memory Module
+
+- A DIMM is the physical RAM stick
+- It is a PCB (board) that holds:
+  - multiple DRAM chips
+  - electrical traces
+  - connector pins
+
+A DIMM by itself stores nothing.
+The DRAM chips on it store the data.
+
+So:
+
+  DIMM = container
+  DRAM chips = actual memory
+
+
+4️⃣ Relationship between DIMM and DRAM (most important)
+-------------------------------------------------------
+
+DIMM
+ ├── DRAM chip
+ ├── DRAM chip
+ ├── DRAM chip
+ ├── DRAM chip
+ └── ...
+
+- A DIMM contains many DRAM chips
+- The chips together provide the required:
+  - data width (usually 64 bits)
+  - capacity (e.g., 16 GB)
+
+
+5️⃣ Why multiple DRAM chips are needed on a DIMM
+------------------------------------------------
+
+The CPU expects memory accesses of 64 bits at a time.
+
+But:
+- One DRAM chip might provide only 8 bits (x8)
+
+So:
+
+  8 DRAM chips × 8 bits = 64 bits
+
+That group of chips forms a rank.
+
+
+6️⃣ Where rank fits in (important bridge)
+-----------------------------------------
+
+- A rank is a group of DRAM chips on a DIMM
+- The group together provides the full 64-bit data width
+- A DIMM can have:
+  - 1 rank (single-rank)
+  - 2 ranks (dual-rank)
+  - 4 ranks (quad-rank)
+
+Example:
+
+DIMM (dual-rank)
+ ├── Rank 0 → 8 DRAM chips
+ └── Rank 1 → 8 DRAM chips
+
+Only one rank can be active at a time per channel.
+
+
+7️⃣ Where banks fit in
+----------------------
+
+Inside each DRAM chip:
+- Memory is further divided into banks
+- Banks allow pipelining and overlap of operations
+- They improve throughput inside a rank
+
+Hierarchy:
+
+Channel
+ └── DIMM
+     └── Rank
+         └── DRAM chip
+            	└── Bank
+         └── DRAM chip
+            	 └── Bank
+         └── DRAM chip
+            	 └── Bank
+         └── DRAM chip
+             	└── Bank
+         └── DRAM chip
+            	└── Bank
+         └──DRAM chip
+             	└── Bank
+       
