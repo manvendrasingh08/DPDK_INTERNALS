@@ -1,0 +1,356 @@
+================================================================================
+                 SR-IOV — COMPLETE MENTAL MODEL & REFERENCE
+          (From PCIe hardware to DPDK, queues, DMA, PF, VF, packets)
+================================================================================
+
+SECTION 0: ONE-LINE TRUTH
+-------------------------
+SR-IOV lets ONE physical NIC expose MULTIPLE real hardware PCIe devices (VFs),
+so packets are DMA’d directly into VM/app memory without host kernel or
+hypervisor in the data path.
+
+================================================================================
+SECTION 1: WHAT PROBLEM SR-IOV SOLVES
+------------------------------------
+
+WITHOUT SR-IOV (Hypervisor vNIC):
+---------------------------------
+Wire
+ → NIC
+ → Host kernel driver
+ → Host network stack / vSwitch
+ → Hypervisor mediation
+ → VM kernel
+ → VM app
+
+Problems:
+- Multiple packet copies
+- Context switches
+- Interrupt storms
+- Software switching
+- High latency, low throughput
+- Unpredictable performance
+
+WITH SR-IOV:
+------------
+Wire
+ → NIC hardware
+ → VF RX queue
+ → DMA → VM/app memory
+
+Result:
+- Zero copy
+- No host kernel in datapath
+- No hypervisor in datapath
+- Deterministic latency
+- Near bare-metal performance
+
+================================================================================
+SECTION 2: WHAT PF AND VF ACTUALLY ARE (NO ABSTRACTION)
+-------------------------------------------------------
+
+PF and VF are NOT software objects.
+PF and VF are PCIe FUNCTIONS implemented in NIC silicon.
+
+PCIe address format:
+0000:03:00.0  → function 0 (PF)
+0000:03:10.0  → function 1 (VF0)
+0000:03:10.1  → function 2 (VF1)
+
+Each function:
+- Appears as a real PCI device
+- Has its own registers
+- Has its own BARs
+- Has its own interrupts
+- Has its own DMA access
+
+================================================================================
+SECTION 3: PHYSICAL FUNCTION (PF)
+--------------------------------
+
+PF = Full-featured PCIe function (control plane)
+
+PF responsibilities:
+- Enable SR-IOV
+- Create/enable VFs
+- NIC firmware access
+- Global NIC configuration
+- Resource allocation
+- MAC/VLAN/RSS configuration
+
+PF exists ONLY on the host.
+
+PF is NOT used for fast packet processing.
+
+================================================================================
+SECTION 4: VIRTUAL FUNCTION (VF)
+--------------------------------
+
+VF = Lightweight PCIe function (data plane)
+
+Each VF has:
+- Dedicated RX queues
+- Dedicated TX queues
+- Dedicated DMA engines
+- Dedicated MSI-X interrupts
+- Restricted BAR access
+
+Each VF CANNOT:
+- Reconfigure NIC
+- Access firmware
+- Touch other VFs
+- Touch PF registers
+
+Each VF CAN:
+- Transmit packets
+- Receive packets
+- DMA directly into memory
+
+================================================================================
+SECTION 5: WHERE PFs AND VFs LIVE (PHYSICAL VIEW)
+-------------------------------------------------
+
++------------------------------------------------------------------+
+|                          NIC SILICON                              |
+|                                                                  |
+|  +-------------------+                                           |
+|  | PF LOGIC          |  Control Plane                             |
+|  | - Firmware        |                                           |
+|  | - SR-IOV Manager  |                                           |
+|  | - Resource Alloc  |                                           |
+|  +-------------------+                                           |
+|                                                                  |
+|  +-------------------+   +-------------------+                   |
+|  | VF0 LOGIC         |   | VF1 LOGIC         |                   |
+|  | RX/TX Queues      |   | RX/TX Queues      |                   |
+|  | DMA Engines       |   | DMA Engines       |                   |
+|  +-------------------+   +-------------------+                   |
+|                                                                  |
+|  +-------------------+   +-------------------+                   |
+|  | VF2 LOGIC         |   | VF3 LOGIC         |                   |
+|  | RX/TX Queues      |   | RX/TX Queues      |                   |
+|  | DMA Engines       |   | DMA Engines       |                   |
+|  +-------------------+   +-------------------+                   |
+|                                                                  |
+|  Packet Parser + Hardware Classifier + Queue Selector             |
++------------------------------------------------------------------+
+
+IMPORTANT:
+- VFs are pre-built in silicon
+- PF only ENABLES or DISABLES them
+
+================================================================================
+SECTION 6: QUEUES — WITH AND WITHOUT SR-IOV
+-------------------------------------------
+
+FACT:
+Queues ALWAYS live in NIC hardware.
+
+WITHOUT SR-IOV:
+---------------
+- Only PF exists
+- All queues belong to PF
+- Queues are shared
+- Kernel demultiplexes packets
+
+Wire
+ → NIC
+ → Shared RX queue
+ → Kernel
+ → Software decision
+
+WITH SR-IOV:
+------------
+- PF + multiple VFs exist
+- Queues are partitioned
+- Each VF owns its queues
+- Hardware demultiplexes packets
+
+Wire
+ → NIC
+ → VF RX queue (already decided)
+ → DMA → VM/app memory
+
+================================================================================
+SECTION 7: ONE WIRE — MANY VFs (HOW PACKETS ARE STEERED)
+--------------------------------------------------------
+
+There is ONE physical wire, but NIC decides packet destination
+BEFORE software sees it.
+
+Hardware packet pipeline:
+-------------------------
+Wire
+ ↓
+PHY
+ ↓
+MAC
+ ↓
+Packet Parser
+ ↓
+Hardware Classifier
+ ↓
+Queue Selector
+ ↓
+VF RX Queue
+ ↓
+DMA → Memory
+
+Classification keys:
+- Destination MAC
+- VLAN ID
+- EtherType
+- IP 5-tuple (RSS hash)
+- Flow Director rules
+
+Example (MAC-based):
+--------------------
+VF0 MAC = 00:11:22:33:44:01
+VF1 MAC = 00:11:22:33:44:02
+
+Incoming packet MAC = 00:11:22:33:44:02
+→ Hardware sends directly to VF1 queue
+
+NO software involvement.
+
+================================================================================
+SECTION 8: BARs (BASE ADDRESS REGISTERS)
+---------------------------------------
+
+BAR = Memory-mapped window into hardware registers.
+
+CPU writes to BAR address →
+PCIe transaction →
+NIC hardware reacts.
+
+PF BARs:
+- Full control registers
+- Firmware access
+- SR-IOV enable
+
+VF BARs:
+- Queue pointers
+- DMA addresses
+- Interrupt control
+
+When DPDK does:
+tx_ring->tail = x;
+
+Reality:
+CPU → BAR write → NIC TX engine → DMA → wire
+
+================================================================================
+SECTION 9: DMA (WHY ZERO COPY IS POSSIBLE)
+------------------------------------------
+
+DMA = NIC reads/writes memory directly.
+
+WITHOUT SR-IOV:
+NIC → Host buffer → copy → VM buffer
+
+WITH SR-IOV:
+NIC → DMA → VM/app memory
+
+Benefits:
+- Zero copy
+- Cache friendly
+- Predictable latency
+- Low CPU usage
+
+IOMMU:
+- Restricts DMA regions
+- Prevents VF memory abuse
+- Enforces isolation
+
+================================================================================
+SECTION 10: WHY SR-IOV IS FAST (REAL REASONS)
+--------------------------------------------
+
+1. Hardware queue ownership (no contention)
+2. Zero-copy DMA
+3. No kernel networking stack
+4. No hypervisor mediation
+5. Poll-mode operation (DPDK)
+6. Dedicated interrupts (MSI-X)
+7. CPU cache locality
+8. Deterministic scheduling
+
+================================================================================
+SECTION 11: SR-IOV VS HYPERVISOR vNIC
+------------------------------------
+
+vNIC:
+- Software device
+- Emulated
+- Packet copies
+- Hypervisor in datapath
+- High latency
+
+VF:
+- Real PCI device
+- Hardware queues
+- Direct DMA
+- Hypervisor bypassed
+- Line-rate throughput
+
+================================================================================
+SECTION 12: HOST VS VM RESPONSIBILITIES
+---------------------------------------
+
+HOST:
+- Owns PF
+- Enables SR-IOV
+- Creates VFs
+- Assigns VFs to VMs/apps
+
+VM / App:
+- Sees VF as PCI device
+- Cannot create VFs
+- Cannot control NIC
+- Can TX/RX packets
+
+================================================================================
+SECTION 13: DPDK CONTEXT (IMPORTANT FOR YOU)
+--------------------------------------------
+
+- Each VF = one DPDK port
+- Each queue = one lcore
+- lcore polls hardware queue
+- mbufs filled via DMA
+- No kernel, no hypervisor
+
+Mapping:
+lcore ↔ RX/TX queue ↔ VF ↔ NIC hardware
+
+================================================================================
+SECTION 14: WHAT SR-IOV DOES NOT DO
+----------------------------------
+
+- Does NOT duplicate the wire
+- Does NOT create hardware dynamically
+- Does NOT remove control plane
+- Does NOT replace switching/routing
+- Does NOT eliminate need for IOMMU
+
+================================================================================
+SECTION 15: FINAL LOCK-IN SUMMARY
+--------------------------------
+
+✔ Queues always exist in NIC hardware
+✔ PF owns control plane
+✔ VF owns data plane
+✔ VFs are real PCIe devices
+✔ Hardware decides packet destination
+✔ DMA enables zero-copy
+✔ SR-IOV bypasses kernel/hypervisor datapath
+✔ One NIC → many independent hardware endpoints
+
+MENTAL MODEL:
+-------------
+Without SR-IOV: software decides where packets go
+With SR-IOV:    hardware decides where packets go
+
+================================================================================
+END OF DOCUMENT — SR-IOV MASTER REFERENCE
+================================================================================
+
