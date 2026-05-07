@@ -1,0 +1,225 @@
+================================================================================
+                         DPDK KNI — COMPLETE INTERNALS
+================================================================================
+
+0. WHAT KNI IS
+--------------------------------------------------------------------------------
+KNI (Kernel NIC Interface) is a HYBRID mechanism that allows:
+- A DPDK user-space application
+- To exchange packets with
+- The Linux kernel networking stack
+
+KNI = Kernel Module + User-space Library
+
+It creates a Linux network interface (kni0) backed by DPDK mbufs.
+
+
+1. KNI COMPONENTS
+--------------------------------------------------------------------------------
+1) Kernel module      : rte_kni.ko
+2) User-space library : librte_kni.so
+3) Shared memory      : hugepages
+4) Data structures    : rings + mbufs
+
+KNI is NOT a PMD.
+KNI does NOT own the NIC.
+
+
+2. NIC OWNERSHIP (CRITICAL)
+--------------------------------------------------------------------------------
+Normal DPDK:
+  NIC -> DMA -> mbuf -> PMD -> rte_eth_rx_burst()
+
+DPDK + KNI:
+  NIC -> DMA -> kernel driver -> skb -> KNI -> mbuf -> rte_kni_rx_burst()
+
+FACT:
+- NIC is bound to a KERNEL DRIVER
+- PMD IS COMPLETELY OUT OF THE DATA PATH
+- rte_eth_rx_burst() IS NOT USED
+
+
+3. WHY KNI EXISTS
+--------------------------------------------------------------------------------
+- Allow Linux tools (ip, ping, ssh, tcpdump) with DPDK
+- Handle control-plane traffic
+- Debugging and prototyping
+- VM environments without VFIO / SR-IOV
+
+NOT meant for high-speed dataplane.
+
+
+4. MEMORY REALITY (WHY COPYING IS REQUIRED)
+--------------------------------------------------------------------------------
+Kernel memory:
+- skb
+- kernel virtual address space
+
+User memory:
+- rte_mbuf
+- hugepage-backed
+- user virtual address space
+
+Kernel CANNOT give skb memory to user space.
+User space CANNOT access skb memory.
+
+RESULT:
+- PACKET BYTES MUST BE COPIED (memcpy)
+- POINTER SHARING IS IMPOSSIBLE
+
+
+5. KNI RINGS (CORE OF EVERYTHING)
+--------------------------------------------------------------------------------
+Each KNI interface has 4 rings (lockless, shared memory):
+
+1) rx_q     : Kernel  -> DPDK   (packets)
+2) tx_q     : DPDK    -> Kernel (packets)
+3) alloc_q  : DPDK    -> Kernel (empty mbufs)
+4) free_q   : Kernel  -> DPDK   (used mbufs)
+
+Ring entries contain:
+- struct rte_mbuf *
+
+NOT packet bytes.
+
+
+6. RING PRODUCER / CONSUMER MODEL
+--------------------------------------------------------------------------------
+Ring      Producer    Consumer
+--------------------------------
+rx_q      Kernel      DPDK
+tx_q      DPDK        Kernel
+alloc_q   DPDK        Kernel
+free_q    Kernel      DPDK
+
+Single-producer / Single-consumer
+Lockless
+Atomic head/tail
+
+
+7. RX PATH (KERNEL -> DPDK)
+--------------------------------------------------------------------------------
+1) NIC DMA -> kernel driver
+2) Kernel builds skb
+3) KNI kernel module runs
+4) Kernel dequeues EMPTY mbuf from alloc_q
+5) memcpy(skb->data -> mbuf->buf_addr)
+6) Set mbuf metadata (pkt_len, data_len)
+7) Enqueue mbuf to rx_q
+8) DPDK calls rte_kni_rx_burst()
+9) mbuf dequeued from rx_q
+10) DPDK processes packet
+
+If alloc_q is EMPTY:
+- KERNEL DROPS PACKET
+
+
+8. TX PATH (DPDK -> KERNEL)
+--------------------------------------------------------------------------------
+1) DPDK prepares mbuf
+2) DPDK calls rte_kni_tx_burst()
+3) mbuf enqueued to tx_q
+4) KNI kernel module dequeues mbuf
+5) Kernel allocates skb
+6) memcpy(mbuf->buf_addr -> skb->data)
+7) skb injected into kernel stack
+8) Kernel enqueues mbuf to free_q
+9) DPDK reclaims mbuf from free_q
+
+
+9. WHERE COPYING IS IMPLEMENTED
+--------------------------------------------------------------------------------
+Copy is NOT a Linux rule.
+Copy is NOT optional.
+
+Copy is EXPLICITLY coded in:
+  dpdk/kernel/linux/kni/kni_net.c
+
+RX copy:
+  memcpy(skb -> mbuf)
+
+TX copy:
+  memcpy(mbuf -> skb)
+
+This is WHY KNI is slow.
+
+
+10. KNI APIS (WHAT EACH DOES)
+--------------------------------------------------------------------------------
+rte_kni_alloc()
+- Creates shared rings
+- Registers kniX net_device
+- Connects kernel <-> user space
+
+rte_kni_alloc_mbufs()
+- Pushes empty mbufs into alloc_q
+- REQUIRED for RX to work
+
+rte_kni_rx_burst()
+- Dequeues mbufs from rx_q
+- Kernel -> DPDK data path
+
+rte_kni_tx_burst()
+- Enqueues mbufs into tx_q
+- DPDK -> Kernel data path
+
+rte_kni_handle_request()
+- Handles kernel ioctl requests:
+  - interface UP/DOWN
+  - MTU change
+  - MAC change
+- Drains free_q
+- MUST be called periodically
+
+
+11. FULL APPLICATION FLOW
+--------------------------------------------------------------------------------
+INIT:
+- Create mbuf pool
+- Setup rte_kni_conf
+- Setup rte_kni_ops
+- rte_kni_alloc()
+- rte_kni_alloc_mbufs()
+
+MAIN LOOP:
+while (1) {
+    rte_kni_handle_request();   // control + free_q
+    rte_kni_rx_burst();         // kernel -> dpdk
+    process_packets();
+    rte_kni_tx_burst();         // dpdk -> kernel
+}
+
+
+12. WHAT KNI IS NOT
+--------------------------------------------------------------------------------
+- NOT zero-copy
+- NOT high-performance
+- NOT a PMD
+- NOT owning the NIC
+- NOT scalable
+
+
+13. WHY KNI IS DEPRECATED
+--------------------------------------------------------------------------------
+- skb <-> mbuf copy overhead
+- Kernel context switching
+- Poor NUMA behavior
+- Security concerns
+
+REPLACEMENTS:
+- AF_XDP (zero-copy)
+- vhost-user
+- TAP (simpler)
+- TC / XDP redirect
+
+
+14. FINAL ONE-LINE VERDICT
+--------------------------------------------------------------------------------
+"KNI is a kernel-module-backed virtual NIC that bridges Linux networking and
+DPDK by copying packets between skb and mbuf using shared lockless rings,
+with the PMD completely out of the data path."
+
+================================================================================
+END — YOU NOW FULLY UNDERSTAND KNI
+================================================================================
+
