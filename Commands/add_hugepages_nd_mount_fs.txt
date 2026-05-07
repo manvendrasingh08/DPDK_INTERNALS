@@ -1,0 +1,77 @@
+# ================================
+# 🟢 ADD HUGE PAGES VIA GRUB (PERSISTENT METHOD)
+# ================================
+# Reserve 1024 hugepages of 2 MB each at boot
+
+# -------------------------------
+# STEP 1️⃣ Edit GRUB configuration
+# -------------------------------
+sudo nano /etc/default/grub
+
+# Find the line:
+# GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+
+# Change it to:
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash hugepagesz=2M hugepages=1024"
+
+# -------------------------------
+# STEP 2️⃣ Update GRUB (MANDATORY)
+# -------------------------------
+sudo update-grub
+
+# You should see something like:
+# Found linux image ... done
+
+# -------------------------------
+# STEP 3️⃣ Reboot the system
+# -------------------------------
+sudo reboot
+
+# -------------------------------
+# STEP 4️⃣ Verify hugepages after reboot
+# -------------------------------
+cat /proc/cmdline
+# Must show: hugepagesz=2M hugepages=1024
+
+cat /proc/meminfo | grep Huge
+# Expected:
+# HugePages_Total: 1024
+# HugePages_Free:  1024
+# Hugetlb:         2097152 kB
+
+# -------------------------------
+# STEP 5️⃣ Mount hugetlbfs (runtime access)
+# -------------------------------
+# Create mount point (once)
+sudo mkdir -p /dev/hugepages
+
+# Mount hugetlbfs
+sudo mount -t hugetlbfs nodev /dev/hugepages
+
+# Verify
+mount | grep huge
+# Expected:
+# hugetlbfs on /dev/hugepages type hugetlbfs (rw,relatime,pagesize=2M)
+
+# -------------------------------
+# STEP 6️⃣ Make hugetlbfs persistent (recommended)
+# -------------------------------
+sudo nano /etc/fstab
+
+# Add this line at the end:
+nodev /dev/hugepages hugetlbfs defaults,pagesize=2M 0 0
+
+# Apply immediately without reboot
+sudo mount -a
+
+# -------------------------------
+# ✅ FINAL CHECKLIST (must all pass)
+# -------------------------------
+cat /proc/cmdline
+cat /proc/meminfo | grep Huge
+mount | grep huge
+# Expected:
+# GRUB has hugepage params
+# Hugepages allocated at boot
+# hugetlbfs mounted
+
