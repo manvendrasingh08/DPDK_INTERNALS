@@ -1,0 +1,145 @@
+===========================
+DPDK REMOTE LAUNCH APIS
+===========================
+
+-------------------------------------------------
+1) rte_eal_remote_launch()
+-------------------------------------------------
+
+Prototype:
+----------
+int rte_eal_remote_launch(
+    int (*f)(void *),
+    void *arg,
+    unsigned int lcore_id
+);
+
+What it does:
+-------------
+Launches function `f()` on ONE specific DPDK lcore (lcore_id).
+
+When to use:
+------------
+Use when you want fine-grained control and need to assign
+different roles/functions to specific lcores (RX, TX, stats, control).
+
+Important points:
+-----------------
+- Non-blocking
+- Target lcore must be in WAIT state
+- Does NOT create a new thread
+- Runs on the specified lcore only
+
+Typical usage:
+--------------
+rte_eal_remote_launch(lcore_fn, NULL, 2);
+
+-------------------------------------------------
+WAIT FUNCTION FOR rte_eal_remote_launch()
+-------------------------------------------------
+
+Prototype:
+----------
+int rte_eal_wait_lcore(unsigned int lcore_id);
+
+What it does:
+-------------
+Waits until the function running on the given lcore finishes.
+
+When to use:
+------------
+Use when you need ordered execution, cleanup, or graceful shutdown
+for a specific lcore.
+
+Typical usage:
+--------------
+rte_eal_remote_launch(worker, NULL, 2);
+rte_eal_wait_lcore(2);
+
+
+=================================================
+2) rte_eal_mp_remote_launch()
+=================================================
+
+Prototype:
+----------
+int rte_eal_mp_remote_launch(
+    int (*f)(void *),
+    void *arg,
+    enum rte_rmt_call_master_t call_master
+);
+
+What it does:
+-------------
+Launches the SAME function `f()` on ALL enabled lcores
+(optionally including the main lcore).
+
+When to use:
+------------
+Use when all lcores run identical logic (SPMD model),
+e.g., packet RX/TX loops, polling NIC queues.
+This is the MOST COMMON DPDK launch API.
+
+-------------------------------------------------
+enum rte_rmt_call_master_t values
+-------------------------------------------------
+
+enum rte_rmt_call_master_t {
+    CALL_MASTER,   // main lcore ALSO runs f()
+    SKIP_MASTER    // only worker lcores run f()
+};
+
+Meaning:
+--------
+CALL_MASTER  -> main lcore executes f(arg)
+SKIP_MASTER  -> main lcore is excluded
+
+Typical usage:
+--------------
+rte_eal_mp_remote_launch(worker_loop, NULL, SKIP_MASTER);
+
+
+-------------------------------------------------
+WAIT FUNCTION FOR rte_eal_mp_remote_launch()
+-------------------------------------------------
+
+Prototype:
+----------
+int rte_eal_mp_wait_lcore(void);
+
+What it does:
+-------------
+Waits until ALL lcores launched via
+rte_eal_mp_remote_launch() have finished execution.
+
+When to use:
+------------
+Use during application shutdown, error handling,
+or when all worker lcores must complete before exit.
+
+Typical usage:
+--------------
+rte_eal_mp_remote_launch(worker_loop, NULL, CALL_MASTER);
+rte_eal_mp_wait_lcore();
+
+
+=================================================
+IMPORTANT DESIGN NOTES (REMEMBER THIS)
+=================================================
+
+- Lcores are long-lived, CPU-pinned threads created during rte_eal_init()
+- Remote launch APIs DO NOT create threads
+- They only assign work to idle lcores
+- No kernel scheduling, no context switching
+- State machine per lcore:
+    WAIT -> RUNNING -> FINISHED -> WAIT
+
+=================================================
+ONE-LINE MEMORY HOOK
+=================================================
+
+rte_eal_remote_launch()     -> one lcore, precise control
+rte_eal_mp_remote_launch()  -> all lcores, same function
+rte_eal_wait_lcore()        -> wait for one lcore
+rte_eal_mp_wait_lcore()     -> wait for all lcores
+
