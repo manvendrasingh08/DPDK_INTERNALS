@@ -1,0 +1,423 @@
+================================================================================
+                  DPDK POLL MODE DRIVERS (PMD)
+        ABSOLUTE COMPLETE REFERENCE (THEORY + INTERNALS + REALITY)
+================================================================================
+
+THIS DOCUMENT CONTAINS:
+- Why PMDs exist
+- What PMDs are
+- Hardware PMDs
+- Virtual PMDs
+- virtio internals
+- af_packet FULL internals (with copy clarification)
+- tap internals
+- vfio / uio relation to PMDs
+- VM vs bare-metal behavior
+- Final unified mental model
+
+================================================================================
+1. WHY POLL MODE DRIVERS EXIST
+-----------------------------
+
+Traditional Linux networking is INTERRUPT-DRIVEN.
+
+RX path:
+    NIC
+     ↓ interrupt
+    Kernel ISR
+     ↓
+    softirq / NAPI
+     ↓
+    skb
+     ↓
+    Kernel IP stack
+     ↓
+    copy_to_user()
+     ↓
+    Application
+
+Problems:
+- Interrupt storms
+- Context switches
+- Cache thrashing
+- Multiple memory copies
+- Unpredictable latency
+- Does not scale at high PPS
+
+DPDK decision:
+    "Remove interrupts.
+     Remove kernel networking stack.
+     Use polling.
+     Dedicate CPU cores."
+
+Polling requires Poll Mode Drivers (PMDs).
+
+================================================================================
+2. WHAT A POLL MODE DRIVER (PMD) IS
+----------------------------------
+
+A PMD is a USERSPACE network driver that:
+- Uses polling (busy loop)
+- Avoids interrupts
+- Exposes rte_ethdev API
+- Uses rte_mbuf
+- Feeds packets to DPDK apps
+
+DPDK application ALWAYS uses:
+    rte_eth_rx_burst()
+    rte_eth_tx_burst()
+
+PMD hides WHERE packets come from.
+
+================================================================================
+3. WHERE PMD FITS IN DPDK
+------------------------
+
+        +---------------------------+
+        |   DPDK Application        |
+        |   (lcore polling loop)    |
+        +-------------▲-------------+
+                      |
+              rte_eth_rx_burst()
+                      |
+        +-------------▼-------------+
+        |   Poll Mode Driver (PMD)  |
+        +-------------▲-------------+
+                      |
+              Backend (varies)
+                      |
+        +-------------▼-------------+
+
+================================================================================
+4. TYPES OF PMDs
+----------------
+
+A) HARDWARE PMDs
+   - Control real NIC hardware
+   - Use DMA rings
+   - No kernel involvement (after init)
+
+Examples:
+   net_ixgbe   (Intel 10G)
+   net_i40e    (Intel 40G)
+   net_ice     (Intel 100G)
+   net_mlx5    (Mellanox)
+
+RX path:
+   NIC DMA → hugepage → rte_mbuf → app
+
+B) VIRTUAL PMDs
+   - No direct NIC register access
+   - Software or hypervisor backed
+   - Same API, lower performance
+
+Examples:
+   net_virtio
+   net_af_packet
+   net_tap
+   net_ring
+   net_pcap
+
+================================================================================
+5. WHAT "VIRTUAL PMD" MEANS
+--------------------------
+
+A Virtual PMD:
+- Does NOT own PCI device
+- Does NOT program NIC registers
+- Polls software structures
+- Still behaves like a NIC to DPDK
+
+Why they exist:
+- DPDK inside VMs
+- No PCI passthrough
+- Learning & debugging
+- Linux ↔ DPDK integration
+- Testing without hardware
+
+Virtual PMDs are NOT fake.
+They fully implement ethdev contract.
+
+================================================================================
+6. VIRTIO PMD (net_virtio) — INTERNALS
+-------------------------------------
+
+Virtio is a PARAVIRTUALIZED NIC standard.
+
+Used in:
+- KVM / QEMU
+- Cloud VMs
+
+Architecture:
+
+Guest VM:
+   DPDK App
+      ↓
+   virtio PMD
+      ↓
+   Virtqueues (shared memory)
+      ↓
+Hypervisor
+      ↓
+Host NIC
+
+Virtqueue:
+   - Descriptor table
+   - Available ring
+   - Used ring
+
+RX path:
+   Host NIC → hypervisor → shared memory → rte_mbuf → app
+
+TX path:
+   app → shared memory → hypervisor → host NIC
+
+Characteristics:
+- Shared memory
+- Minimal copies
+- No Linux networking stack
+- Near-hardware performance in VMs
+
+================================================================================
+7. AF_PACKET PMD (net_af_packet) — FULL INTERNALS
+------------------------------------------------
+
+AF_PACKET is a LINUX KERNEL SOCKET FAMILY.
+It provides RAW Ethernet access.
+
+IMPORTANT:
+AF_PACKET IS NOT A DRIVER.
+IT IS A KERNEL PACKET TAP.
+
+Kernel RX flow:
+
+    NIC
+     ↓ DMA
+    Kernel RX ring
+     ↓
+    skb creation
+     ↓
+    AF_PACKET hook  <---- HERE
+     ↓
+    Kernel IP stack (skipped)
+
+DPDK uses AF_PACKET with PACKET_MMAP (TPACKET).
+
+================================================================================
+7.1 PACKET_MMAP / TPACKET
+------------------------
+
+Kernel allocates a SHARED ring buffer:
+- Circular
+- Divided into frames
+- mmap()'d into user space
+
+TPACKET versions:
+   V1 (old)
+   V2 (stable)
+   V3 (batching, preferred)
+
+Frame layout:
+   [ tpacket_hdr | Ethernet frame data ]
+
+Frame ownership:
+   TP_STATUS_KERNEL → kernel owns frame
+   TP_STATUS_USER   → user owns frame
+
+================================================================================
+7.2 AF_PACKET RX PATH (EXACT, STEP-BY-STEP)
+-------------------------------------------
+
+Kernel side:
+   1. NIC receives packet
+   2. DMA into kernel memory
+   3. skb is created
+   4. Packet COPIED into TPACKET frame
+   5. Frame status = TP_STATUS_USER
+
+DPDK PMD side:
+   6. PMD polls frame status
+   7. Detects TP_STATUS_USER
+   8. Allocates rte_mbuf
+   9. COPIES packet into mbuf data buffer
+  10. Sets mbuf metadata
+  11. Returns mbuf to application
+  12. Sets frame status = TP_STATUS_KERNEL
+
+CRITICAL TRUTH:
+   AF_PACKET HAS *TWO COPIES*:
+     1) NIC → kernel (DMA)
+     2) Kernel frame → rte_mbuf
+
+================================================================================
+7.3 AF_PACKET TX PATH
+---------------------
+
+   app fills rte_mbuf
+   ↓
+   PMD copies mbuf → TX frame
+   ↓
+   TP_STATUS_SEND_REQUEST
+   ↓
+   kernel transmits packet
+   ↓
+   frame freed
+
+================================================================================
+7.4 WHY AF_PACKET IS STILL A PMD
+--------------------------------
+
+- No interrupts to application
+- No blocking syscalls
+- PMD continuously polls memory
+- Polling frame status, not hardware
+
+Polling != hardware-only polling.
+
+================================================================================
+7.5 AF_PACKET CHARACTERISTICS
+-----------------------------
+
+Kernel involved: YES
+PCI required: NO
+Zero-copy: NO
+Performance: MEDIUM
+Learning/debugging: EXCELLENT
+Production dataplane: NO
+
+================================================================================
+8. TAP PMD (net_tap) — INTERNALS
+--------------------------------
+
+TAP = Virtual Ethernet interface (tap0).
+
+Architecture:
+
+   DPDK App
+      ↓
+   tap PMD
+      ↓
+   TAP device
+      ↓
+   Linux networking stack
+      ↓
+   Other apps / namespaces
+
+RX:
+   kernel writes to tap
+   PMD polls fd
+   copies to mbuf
+
+TX:
+   PMD writes to tap
+   kernel receives packet
+
+Use cases:
+- DPDK ↔ Linux stack
+- Traffic injection
+- Testing
+- Hybrid pipelines
+
+================================================================================
+9. VFIO / UIO AND PMDs (IMPORTANT CLARIFICATION)
+-----------------------------------------------
+
+VFIO / UIO ARE NOT PMDs.
+
+They are:
+- PCI device access mechanisms
+- Used by HARDWARE PMDs
+
+Flow with VFIO:
+   NIC PCI device
+     ↓
+   VFIO (secure PCI mapping)
+     ↓
+   Hardware PMD
+     ↓
+   DPDK app
+
+AF_PACKET DOES NOT USE VFIO OR UIO.
+
+================================================================================
+10. HARDWARE PMD vs VIRTUAL PMD (RX COMPARISON)
+-----------------------------------------------
+
+Hardware PMD:
+   NIC DMA → hugepage → rte_mbuf → app
+
+Virtio PMD:
+   Host NIC → shared memory → rte_mbuf → app
+
+AF_PACKET PMD:
+   NIC → skb → kernel ring → COPY → rte_mbuf → app
+
+================================================================================
+11. LCORES AND PMDs
+------------------
+
+DPDK design:
+- One RX queue per lcore
+- One lcore polls one queue
+- No locks
+- Cache locality
+
+Typical loop:
+
+   while (1) {
+       nb_rx = rte_eth_rx_burst();
+       process_packets();
+   }
+
+================================================================================
+12. WHY YOUR VM SHOWS NO PCI DEVICES
+-----------------------------------
+
+Your VM:
+- No PCI passthrough
+- NIC owned by hypervisor
+- Linux sees eth0
+- DPDK sees NO PCI NIC
+
+Therefore:
+- No hardware PMDs possible
+- Correct PMD = net_af_packet
+
+================================================================================
+13. FINAL UNIFIED MENTAL MODEL
+------------------------------
+
+PMD = "A POLLED PACKET PROVIDER"
+
+Hardware PMD:
+   polls NIC DMA rings
+
+Virtio PMD:
+   polls shared memory rings
+
+AF_PACKET PMD:
+   polls kernel-filled frames
+
+TAP PMD:
+   polls virtual Ethernet pipe
+
+SAME API.
+DIFFERENT BACKEND.
+APP DOES NOT CHANGE.
+
+================================================================================
+14. FINAL TAKEAWAY
+-----------------
+
+- PMDs are the HEART of DPDK
+- Polling replaces interrupts
+- Hardware PMDs = maximum performance
+- Virtual PMDs = flexibility + learning
+- AF_PACKET is kernel-assisted polling with copies
+- VFIO/UIO are NOT PMDs
+- Changing PMD does NOT change your app
+
+================================================================================
+END OF PMD KNOWLEDGE — NOTHING MORE IS NEEDED
+================================================================================
+
