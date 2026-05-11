@@ -1,0 +1,156 @@
+What is RTE in DPDK?
+===================
+
+RTE stands for:
+  "Run-Time Environment"
+
+In DPDK, RTE is the core infrastructure layer that provides
+all fundamental services required by a DPDK application.
+
+Every DPDK application is built on top of RTE.
+
+
+Why RTE exists
+--------------
+DPDK runs in user space and bypasses the Linux kernel networking stack.
+Because of this, DPDK cannot rely on kernel services like:
+  - Memory management
+  - Interrupt handling
+  - Thread scheduling
+  - Device abstraction
+  - DMA-safe memory allocation
+
+RTE provides replacements for these services in user space.
+
+
+What RTE provides
+-----------------
+RTE is not a single module.
+It is a collection of libraries and subsystems.
+
+Major responsibilities:
+
+  - CPU core (lcore) management
+  - Hugepage-based memory management
+  - NUMA awareness
+  - DMA-safe memory allocation
+  - Ring buffers
+  - Lockless data structures
+  - Timers
+  - Power management
+  - PCI device discovery
+  - Logging and debug utilities
+  - Environment abstraction (OS, CPU, NUMA)
+
+
+RTE and EAL relationship
+------------------------
+EAL = Environment Abstraction Layer
+EAL is the lowest layer inside RTE.
+
+Hierarchy:
+
+  DPDK Application
+        |
+        v
+      RTE Libraries
+        |
+        v
+      EAL
+        |
+        v
+  Linux / Bare Metal / VM
+
+
+EAL responsibilities:
+  - Initialize CPU cores
+  - Detect NUMA nodes
+  - Reserve hugepages
+  - Setup memory mappings
+  - Initialize timers
+  - Setup PCI and devices
+  - Parse DPDK command-line arguments
+
+Without EAL, RTE cannot function.
+
+
+RTE naming convention
+---------------------
+DPDK uses the prefix "rte_" everywhere.
+
+Examples:
+  rte_eal_init()
+  rte_malloc()
+  rte_mempool_create()
+  rte_ring_enqueue()
+  rte_eth_dev_start()
+  rte_pktmbuf_alloc()
+
+Meaning:
+  Anything starting with "rte_" belongs to the RTE ecosystem.
+
+
+RTE libraries (common ones)
+--------------------------
+  librte_eal        -> Core initialization and environment
+  librte_mempool    -> Memory pool management
+  librte_mbuf       -> Packet buffers
+  librte_ring       -> Lockless rings
+  librte_ethdev     -> Ethernet device abstraction
+  librte_hash       -> Hash tables
+  librte_timer      -> High resolution timers
+  librte_power      -> CPU power management
+
+
+RTE and performance
+-------------------
+RTE is designed for:
+  - Zero-copy packet processing
+  - Cache-friendly data structures
+  - Lockless algorithms
+  - Per-lcore data isolation
+  - Poll-mode execution
+
+Key idea:
+  One core = one logical pipeline
+  No preemption
+  No context switching
+  No sleeping
+
+
+RTE vs Linux kernel
+-------------------
+Linux kernel:
+  - General purpose
+  - Preemptive scheduling
+  - Interrupt driven
+  - Fairness oriented
+
+RTE:
+  - Purpose built for packet processing
+  - Polling based
+  - Runs on dedicated cores
+  - Deterministic latency
+  - Throughput optimized
+
+
+One-line interview definition
+-----------------------------
+RTE in DPDK is the user-space run-time environment that replaces
+kernel services and provides memory, CPU, device, and synchronization
+infrastructure required for high-performance packet processing.
+
+
+Important note
+--------------
+If you see:
+  rte_* functions
+  rte_* structures
+  rte_* libraries
+
+You are dealing with RTE.
+
+
+End of explanation
+==================
+

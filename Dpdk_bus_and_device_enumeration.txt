@@ -1,0 +1,345 @@
+================================================================================
+                     DPDK DEVICE MODEL — COMPLETE TERMINAL NOTES
+================================================================================
+
+GOAL:
+-----
+Understand how DPDK discovers devices, registers buses & drivers, matches them,
+and calls probe — entirely in USERSPACE.
+
+================================================================================
+1. ELF (Executable and Linkable Format)
+================================================================================
+
+ELF is the Linux binary format.
+Your DPDK app and libdpdk.so are ELF files.
+
+IMPORTANT ELF FEATURE USED BY DPDK:
+-----------------------------------
+ELF supports CONSTRUCTORS (functions that run BEFORE main()).
+
+These functions live in:
+    .init_array section of the ELF
+
+Who runs them?
+--------------
+The dynamic loader: ld.so
+
+REAL PROCESS STARTUP FLOW:
+--------------------------
+./dpdk_app
+ |
+ |-- Kernel loads ELF
+ |
+ |-- ld.so (dynamic loader)
+ |     |
+ |     |-- loads libdpdk.so
+ |     |-- runs ALL constructors (.init_array)
+ |
+ |-- __libc_start_main()
+ |
+ |-- main()
+
+KEY POINT:
+----------
+Your application DOES NOT start at main().
+It starts when constructors are executed.
+
+================================================================================
+2. WHAT GETS REGISTERED BEFORE main()
+================================================================================
+
+Using ELF constructors, DPDK registers:
+
+  - BUSES
+  - DRIVERS (PMDs)
+
+NO SCANNING happens yet.
+NO HARDWARE access happens yet.
+
+--------------------------------------------------------------------------------
+2.1 BUS REGISTRATION
+--------------------------------------------------------------------------------
+
+Example macro:
+    RTE_REGISTER_BUS(pci, rte_pci_bus);
+
+Expands conceptually to:
+    __attribute__((constructor))
+    pci_bus_register() {
+        rte_bus_register(&rte_pci_bus);
+    }
+
+Where is the bus stored?
+------------------------
+In a GLOBAL USERSPACE LIST inside DPDK:
+
+    rte_bus_list  (TAILQ)
+
+Memory location:
+----------------
+Userspace RAM, inside libdpdk.so
+
+Structure:
+----------
+rte_bus_list
+  |
+  +-- pci bus
+  +-- vdev bus
+  +-- dpaa bus
+  +-- ...
+
+================================================================================
+2.2 DRIVER (PMD) REGISTRATION
+================================================================================
+
+Example:
+    RTE_PMD_REGISTER_PCI(net_ixgbe, ixgbe_pci_driver);
+
+Expands to constructor:
+    ixgbe_driver_register() {
+        rte_pci_register(&ixgbe_pci_driver);
+    }
+
+Where are drivers stored?
+-------------------------
+Each bus maintains its OWN driver list.
+
+For PCI:
+---------
+pci_driver_list  (TAILQ)
+
+Structure:
+----------
+PCI BUS
+  |
+  +-- pci_driver_list
+        |
+        +-- ixgbe PMD
+        +-- i40e PMD
+        +-- mlx5 PMD
+        +-- ...
+
+Driver data source:
+-------------------
+Static structs compiled into PMD library:
+
+    static struct rte_pci_driver ixgbe_pci_driver = {
+        .id_table = ixgbe_pci_id_map,
+        .probe    = ixgbe_probe,
+    };
+
+Stored in:
+----------
+.rodata / .data of libdpdk_net_ixgbe.so
+
+================================================================================
+3. WHAT EXISTS JUST BEFORE main()
+================================================================================
+
+IN MEMORY (USERSPACE):
+----------------------
+- rte_bus_list
+- per-bus driver lists
+
+NOT YET EXISTING:
+-----------------
+- No devices
+- No scanning
+- No VFIO usage
+- No probe calls
+
+================================================================================
+4. rte_eal_init() — WHERE REAL WORK STARTS
+================================================================================
+
+main()
+ |
+ +-- rte_eal_init()
+       |
+       +-- rte_bus_scan()
+       |
+       +-- rte_bus_probe()
+
+================================================================================
+5. DEVICE SCANNING — WHERE DEVICES COME FROM
+================================================================================
+
+DEVICES ARE NOT PRE-STORED.
+They are CREATED DURING SCAN.
+
+--------------------------------------------------------------------------------
+5.1 PCI BUS SCAN
+--------------------------------------------------------------------------------
+
+Source of truth:
+----------------
+Kernel PCI subsystem (already enumerated hardware)
+
+DPDK reads from:
+----------------
+/sys/bus/pci/devices/
+
+Example:
+--------
+/sys/bus/pci/devices/0000:03:00.0/
+
+Files read:
+-----------
+vendor      -> Vendor ID
+device      -> Device ID
+class       -> Class code
+resource    -> BAR physical addresses
+numa_node   -> NUMA info
+config      -> PCI config space (via kernel)
+
+DPDK creates:
+-------------
+struct rte_pci_device
+
+Stored in:
+----------
+pci_device_list  (TAILQ)
+
+Structure:
+----------
+PCI BUS
+  |
+  +-- pci_device_list
+        |
+        +-- 0000:03:00.0
+        +-- 0000:04:00.0
+        +-- ...
+
+IMPORTANT:
+----------
+Kernel reads REAL PCI config space.
+DPDK NEVER enumerates hardware directly.
+
+================================================================================
+6. DEVICE ↔ DRIVER MATCHING
+================================================================================
+
+Triggered by:
+-------------
+rte_bus_probe()
+
+Logic (PCI bus):
+----------------
+for each pci_device in pci_device_list:
+    for each pci_driver in pci_driver_list:
+        if device.vendor_id & device.device_id
+           matches
+           driver.id_table:
+               call driver->probe(device)
+
+MATCHING IS DONE BY:
+--------------------
+DPDK PCI BUS CODE (userspace)
+
+NOT done by:
+------------
+- Kernel
+- VFIO
+
+================================================================================
+7. PROBE — WHERE VFIO IS USED
+================================================================================
+
+Probe function example:
+-----------------------
+ixgbe_pci_probe(struct rte_pci_driver *, struct rte_pci_device *)
+
+Inside probe():
+---------------
+1. Open /dev/vfio/vfio
+2. Get VFIO group FD
+3. Enable DMA (IOMMU)
+4. mmap BARs (MMIO registers)
+5. Setup RX/TX queues
+6. Register rte_eth_dev
+
+ROLE OF VFIO:
+-------------
+- Secure MMIO access
+- Secure DMA
+- Interrupt management
+
+VFIO DOES NOT:
+--------------
+- Match drivers
+- Store vendor IDs
+- Decide probing
+
+================================================================================
+8. COMPLETE FLOW — END TO END
+================================================================================
+
+ELF LOAD
+ |
+ |-- constructors
+ |     |
+ |     +-- register PCI bus
+ |     +-- register vdev bus
+ |     +-- register PMDs
+ |
+main()
+ |
+rte_eal_init()
+ |
+ +-- rte_bus_scan()
+ |     |
+ |     +-- parse /sys/bus/pci/devices
+ |     +-- create rte_pci_device list
+ |
+ +-- rte_bus_probe()
+       |
+       +-- match device ↔ driver
+       |
+       +-- call PMD probe()
+             |
+             +-- use VFIO
+             +-- mmap BARs
+             +-- NIC ready
+
+================================================================================
+9. OWNERSHIP SUMMARY
+================================================================================
+
+HARDWARE:
+---------
+- PCI configuration space
+
+KERNEL:
+-------
+- Enumerates PCI
+- Reads config space
+- Exposes via sysfs + VFIO
+
+DPDK EAL:
+---------
+- Registers buses & drivers
+- Scans devices (sysfs)
+- Matches devices ↔ drivers
+
+PMD:
+----
+- Programs hardware
+- Fast path (RX/TX)
+
+================================================================================
+10. ONE-LINE TRUTHS (MEMORIZE)
+================================================================================
+
+- Constructors run BEFORE main()
+- Buses & drivers live in userspace memory
+- Devices are created during scan
+- Matching is done by DPDK, not kernel
+- VFIO is access, not logic
+- Kernel still owns enumeration
+- DPDK owns the fast path
+
+================================================================================
+END OF FILE
+================================================================================
+
