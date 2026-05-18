@@ -1,0 +1,135 @@
+
+
+
+==========================
+in cmdline.c
+==========================
+
+
+static void cmd_start_parsed(__rte_unused void *parsed_result,
+			     __rte_unused struct cmdline *cl,
+			     __rte_unused void *data)
+{
+	start_packet_forwarding(0);
+}
+
+======================
+in testpmd.c
+======================
+
+void
+start_packet_forwarding(int with_tx_first)
+{
+	port_fwd_begin_t port_fwd_begin;
+	port_fwd_end_t  port_fwd_end;
+	stream_init_t stream_init = cur_fwd_eng->stream_init;
+	unsigned int i;
+
+	if (strcmp(cur_fwd_eng->fwd_mode_name, "rxonly") == 0 && !nb_rxq)
+		rte_exit(EXIT_FAILURE, "rxq are 0, cannot use rxonly fwd mode\n");
+
+	if (strcmp(cur_fwd_eng->fwd_mode_name, "txonly") == 0 && !nb_txq)
+		rte_exit(EXIT_FAILURE, "txq are 0, cannot use txonly fwd mode\n");
+
+	if ((strcmp(cur_fwd_eng->fwd_mode_name, "rxonly") != 0 &&
+		strcmp(cur_fwd_eng->fwd_mode_name, "txonly") != 0) &&
+		(!nb_rxq || !nb_txq))
+		rte_exit(EXIT_FAILURE,
+			"Either rxq or txq are 0, cannot use %s fwd mode\n",
+			cur_fwd_eng->fwd_mode_name);
+
+	if (all_ports_started() == 0) {
+		fprintf(stderr, "Not all ports were started\n");
+		return;
+	}
+	if (test_done == 0) {
+		fprintf(stderr, "Packet forwarding already started\n");
+		return;
+	}
+
+	fwd_config_setup();
+
+	pkt_fwd_config_display(&cur_fwd_config);
+	if (!pkt_fwd_shared_rxq_check())
+		return;
+
+	if (stream_init != NULL) {
+		update_queue_state(RTE_PORT_ALL);
+		for (i = 0; i < cur_fwd_config.nb_fwd_streams; i++)
+			stream_init(fwd_streams[i]);
+	}
+
+	port_fwd_begin = cur_fwd_config.fwd_eng->port_fwd_begin;
+	if (port_fwd_begin != NULL) {
+		for (i = 0; i < cur_fwd_config.nb_fwd_ports; i++) {
+			if (port_fwd_begin(fwd_ports_ids[i])) {
+				fprintf(stderr,
+					"Packet forwarding is not ready\n");
+				return;
+			}
+		}
+	}
+
+	if (with_tx_first) {
+		port_fwd_begin = tx_only_engine.port_fwd_begin;
+		if (port_fwd_begin != NULL) {
+			for (i = 0; i < cur_fwd_config.nb_fwd_ports; i++) {
+				if (port_fwd_begin(fwd_ports_ids[i])) {
+					fprintf(stderr,
+						"Packet forwarding is not ready\n");
+					return;
+				}
+			}
+		}
+	}
+
+	test_done = 0;
+
+	if(!no_flush_rx)
+		flush_fwd_rx_queues();
+
+	rxtx_config_display();
+
+	fwd_stats_reset();
+	if (with_tx_first) {
+		while (with_tx_first--) {
+			launch_packet_forwarding(
+					run_one_txonly_burst_on_core);
+			rte_eal_mp_wait_lcore();
+		}
+		port_fwd_end = tx_only_engine.port_fwd_end;
+		if (port_fwd_end != NULL) {
+			for (i = 0; i < cur_fwd_config.nb_fwd_ports; i++)
+				(*port_fwd_end)(fwd_ports_ids[i]);
+		}
+	}
+	launch_packet_forwarding(start_pkt_forward_on_core);
+}
+
+======================
+in testpmd.c
+======================
+
+static void
+launch_packet_forwarding(lcore_function_t *pkt_fwd_on_lcore)
+{
+	unsigned int i;
+	unsigned int lc_id;
+	int diag;
+
+	for (i = 0; i < cur_fwd_config.nb_fwd_lcores; i++) {
+		lc_id = fwd_lcores_cpuids[i];
+		if ((interactive == 0) || (lc_id != rte_lcore_id())) {
+			fwd_lcores[i]->stopped = 0;
+			diag = rte_eal_remote_launch(pkt_fwd_on_lcore,
+						     fwd_lcores[i], lc_id);
+			if (diag != 0)
+				fprintf(stderr,
+					"launch lcore %u failed - diag=%d\n",
+					lc_id, diag);
+		}
+	}
+}
+
+===================
+
