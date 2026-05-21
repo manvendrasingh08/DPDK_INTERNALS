@@ -1,0 +1,335 @@
+================================================================================
+                DPDK MULTI-PROCESS IPC (rte_mp) — FULL GUIDE
+================================================================================
+
+Context:
+--------
+DPDK supports multiple processes:
+  - PRIMARY process  : owns shared memory, devices, buses
+  - SECONDARY process: attaches to primary, shares memory
+
+IPC here means:
+  "Send control messages between DPDK processes"
+  (NOT packet transfer, NOT queues, NOT rings)
+
+Mechanism used:
+  rte_mp_* APIs
+  Unix Domain Sockets
+  Shared hugepage-backed memory
+
+================================================================================
+1. PROCESS ROLES
+================================================================================
+
+PRIMARY:
+--------
+- First process started
+- Initializes EAL
+- Creates:
+    * hugepage memory
+    * mempools
+    * devices
+    * MP socket
+- Must be alive for others to communicate
+
+SECONDARY:
+----------
+- Started later
+- Connects to primary's MP socket
+- Cannot create devices
+- Can send/receive MP messages
+
+IMPORTANT RULE:
+---------------
+If PRIMARY exits:
+  ❌ No IPC possible
+  ❌ No message delivery
+  ❌ Secondaries become isolated
+
+================================================================================
+2. MP SOCKET (THE HEART OF IPC)
+================================================================================
+
+Location:
+---------
+/var/run/dpdk/rte/mp_socket
+
+What it is:
+-----------
+- Unix Domain Socket
+- Created ONLY by PRIMARY
+- Used for:
+    * control-plane IPC
+    * rte_mp_sendmsg()
+    * service registration
+    * vdev, bus, telemetry coordination
+
+Your log:
+---------
+EAL: failed to send to (/var/run/dpdk/rte/mp_socket) due to Connection refused
+
+Meaning:
+--------
+✔ Secondary tried to talk
+❌ Primary was NOT running
+❌ Socket not listening
+
+RULE:
+-----
+Primary MUST be running BEFORE secondary starts.
+
+================================================================================
+3. rte/config LOCK (rte_config_lock)
+================================================================================
+
+What is it?
+-----------
+A global lock protecting shared DPDK configuration.
+
+Stored in:
+----------
+struct rte_config (in shared memory)
+
+Why needed?
+-----------
+Multiple processes share:
+  - mempools
+  - devices
+  - buses
+  - services
+  - MP handlers
+
+Without lock:
+-------------
+Race conditions
+Memory corruption
+Undefined behavior
+
+Used when:
+----------
+- registering MP handlers
+- bus probing
+- vdev creation
+- shared config updates
+
+Think of it as:
+---------------
+"Big global mutex for DPDK internals"
+
+================================================================================
+4. MESSAGE FLOW (VERY IMPORTANT)
+================================================================================
+
+APIs:
+-----
+rte_mp_sendmsg()
+rte_mp_action_register()
+rte_mp_unregister()
+
+Data structure:
+---------------
+struct rte_mp_msg {
+    char     name[RTE_MP_MAX_NAME_LEN];
+    uint16_t len_param;
+    uint8_t  param[RTE_MP_MAX_PARAM_LEN];
+};
+
+Memory layout (CONTIGUOUS):
+---------------------------
++------------------------------+
+| rte_mp_msg struct            |
+|                              |
+| name[]        (fixed)        |
+| len_param    (2 bytes)       |
+| param[]      (payload)       |
++------------------------------+
+
+✔ Message header + payload = single structure
+✔ Payload does NOT follow separately
+✔ Copied byte-for-byte via socket
+
+================================================================================
+5. RTE_MP_MAX_PARAM_LEN
+================================================================================
+
+Definition:
+-----------
+Maximum payload size per MP message.
+
+Typical value:
+--------------
+1024 bytes
+
+Meaning:
+--------
+param[] can carry:
+  - struct
+  - flags
+  - integers
+  - small configs
+  - readiness signals
+
+NOT suitable for:
+---------------
+❌ packets
+❌ mbufs
+❌ large data blobs
+
+Rule:
+-----
+If payload > RTE_MP_MAX_PARAM_LEN:
+  → Use rings, memzones, shared memory instead
+
+================================================================================
+6. ready_payload — WHAT & WHY
+================================================================================
+
+What is ready_payload?
+----------------------
+User-defined struct used as message payload.
+
+Example:
+--------
+struct ready_payload {
+    uint32_t ready;
+    uint32_t pid;
+};
+
+Why copy into msg->param?
+-------------------------
+Because:
+  rte_mp_msg.param is just raw bytes (uint8_t[])
+
+Steps:
+------
+1. Fill local struct
+2. memcpy(struct → msg.param)
+3. Send msg
+4. Receiver memcpy(msg.param → struct)
+
+Why not pointer?
+----------------
+❌ Different processes
+❌ Different virtual addresses
+❌ Pointer is meaningless across processes
+
+RULE:
+-----
+ALWAYS copy data into param[]
+ALWAYS reconstruct on receiver side
+
+================================================================================
+7. HANDLER REGISTRATION
+================================================================================
+
+Receiver must register handler FIRST.
+
+API:
+----
+rte_mp_action_register("MSG_NAME", handler_fn);
+
+What happens:
+-------------
+- Handler stored in primary's MP registry
+- Called ONLY when message arrives
+- Runs in:
+    → receiving process context
+
+IMPORTANT:
+----------
+Messages are NOT queued persistently.
+
+================================================================================
+8. MESSAGE DELIVERY GUARANTEE (CRITICAL ANSWER)
+================================================================================
+
+Question:
+---------
+Primary sends msg once
+Primary exits
+Secondary starts later
+Will handler run?
+
+Answer:
+-------
+❌ NO
+❌ NEVER
+❌ IMPOSSIBLE
+
+Why?
+----
+- MP is NOT a message queue
+- No persistence
+- No buffering
+- No replay
+- Socket-based IPC only
+
+Timeline:
+---------
+Primary alive → send → receiver alive → handler runs
+Anything else → message LOST
+
+Think of MP as:
+---------------
+"Unix sendmsg(), not Kafka"
+
+================================================================================
+9. COMPLETE MESSAGE LIFECYCLE
+================================================================================
+
+PRIMARY:
+--------
+1. rte_eal_init()
+2. rte_mp_register()
+3. Wait or run
+4. Receive msg
+5. Handler executes
+
+SECONDARY:
+----------
+1. rte_eal_init(--proc-type=secondary)
+2. Build rte_mp_msg
+3. memcpy payload → msg.param
+4. rte_mp_sendmsg()
+5. Exit or wait
+
+================================================================================
+10. WHAT MP IPC IS GOOD FOR
+================================================================================
+
+✔ Signaling readiness
+✔ Control commands
+✔ Reconfigure behavior
+✔ Start/stop workers
+✔ Notify state changes
+
+================================================================================
+11. WHAT MP IPC IS NOT FOR
+================================================================================
+
+❌ Packet passing
+❌ High throughput data
+❌ Persistent messaging
+❌ Cross-host communication
+
+Use instead:
+------------
+- rte_ring (shared memory)
+- rte_mempool
+- rte_memzone
+- vhost-user
+- virtio-user
+
+================================================================================
+12. ONE-LINE MENTAL MODEL
+================================================================================
+
+rte_mp is:
+-----------
+"A best-effort, synchronous, in-memory control message
+ between *alive* DPDK processes using Unix sockets."
+
+================================================================================
+END — YOU NOW KNOW DPDK IPC PROPERLY
+================================================================================
+

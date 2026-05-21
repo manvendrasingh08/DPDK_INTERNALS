@@ -1,0 +1,17 @@
+Direct and Indirect Buffers
+A direct buffer is a buffer that is completely separate and self-contained. An indirect buffer behaves like a direct buffer but for the fact that the buffer pointer and data offset in it refer to data in another direct buffer. This is useful in situations where packets need to be duplicated or fragmented, since indirect buffers provide the means to reuse the same packet data across multiple buffers.
+
+Typical use cases:
+
+		Multicast / broadcast
+		Packet cloning
+		Header rewriting
+		Zero-copy forwarding
+
+A buffer becomes indirect when it is “attached” to a direct buffer using the **rte_pktmbuf_attach()** function. Each buffer has a reference counter field and whenever an indirect buffer is attached to the direct buffer, the reference counter on the direct buffer is incremented. 
+
+Attempting to attach buffer A to indirect buffer B that is attached to C, makes rte_pktmbuf_attach() automatically attach A to C, effectively cloning B. Secondly, for a buffer to become indirect, its reference counter must be equal to 1, that is, it must not be already referenced by another indirect buffer. Finally, it is not possible to reattach an indirect buffer to the direct buffer (unless it is detached first).
+
+It is detached using the fn rte_pktmbuf_detach()
+
+As indirect buffers only store the meta data and not data, so createing a separaet pool for it will optimize things. But generally dpdk avoids it.

@@ -1,0 +1,322 @@
+================================================================================
+                     COMPLETE NOTES: NAT, PORTS & DPDK
+================================================================================
+
+IMPORTANT FUNDAMENTAL CONCEPT (VERY CLEAR UNDERSTANDING)
+================================================================================
+
+1) PORT NUMBER IS LOGICAL — NOT PHYSICAL
+
+- A port number is NOT a NIC.
+- A port number is NOT a physical ethernet port.
+- A port number is a 16-bit logical number stored inside:
+        TCP header  OR  UDP header
+
+- The physical packet leaves from one physical NIC (like eth0).
+- But inside the packet, the TCP/UDP header contains:
+        Source Port
+        Destination Port
+
+These ports are set by:
+        The operating system (for outgoing connections)
+        OR the server application (for listening ports)
+
+2) HOW APPLICATIONS USE PORTS
+
+Every application inside your machine communicates using a port number.
+
+Example:
+Browser tab → OS assigns ephemeral source port (like 49152)
+Server → listens on well-known port (like 443)
+
+Even if:
+- All packets leave via ONE physical Ethernet port
+- NAT/router uses the TCP/UDP port number inside the header
+- That port number is purely logical
+
+3) PORT NUMBER RANGE
+
+Port is 16-bit.
+Range:
+        0 – 65535
+
+Divided into:
+
+0 – 1023      → Well-known ports (HTTP=80, HTTPS=443, SSH=22)
+1024 – 49151  → Registered ports
+49152 – 65535 → Ephemeral (dynamic) ports
+
+Ephemeral ports are automatically chosen by OS for outgoing connections.
+
+4) CHECK EPHEMERAL PORT RANGE (LINUX)
+
+To see what range your OS uses:
+
+        cat /proc/sys/net/ipv4/ip_local_port_range
+
+Example output:
+        32768   60999
+
+Meaning:
+The OS will choose source ports from this range for outgoing connections.
+
+You can also check listening ports:
+
+        ss -tulnp
+        netstat -tulnp
+
+================================================================================
+SECTION 1: WHAT IS NAT?
+================================================================================
+
+NAT = Network Address Translation
+
+Purpose:
+- Convert private IPs to public IPs
+- Allow many devices to share one public IP
+- Hide internal network
+- Conserve IPv4 addresses
+
+NAT modifies:
+- IPv4 address
+- TCP/UDP port (in PAT)
+- Recalculates checksums
+
+================================================================================
+SECTION 2: TYPES OF NAT
+================================================================================
+
+1) Static NAT (1:1 mapping)
+2) Dynamic NAT (Pool)
+3) PAT (Port Address Translation, many-to-one)
+
+Focus:
+- Static NAT
+- Dynamic NAT (PAT)
+
+================================================================================
+SECTION 3: STATIC NAT
+================================================================================
+
+Definition:
+Permanent mapping between private IP and public IP.
+
+Example:
+Private:  192.168.1.10
+Public:   49.x.x.x
+
+Mapping:
+49.x.x.x <--> 192.168.1.10
+
+Properties:
+- No timeout
+- Fixed mapping
+- Usually no port translation
+- Simple rewrite logic
+
+================================================================================
+SECTION 4: DYNAMIC NAT (PAT)
+================================================================================
+
+Definition:
+Multiple private IPs share one public IP using port translation.
+
+Example:
+192.168.1.10:50000 → 49.x.x.x:40001
+192.168.1.11:51000 → 49.x.x.x:40002
+
+Properties:
+- Requires NAT state table
+- Requires port allocation
+- Requires timeout handling
+- Bidirectional mapping required
+
+================================================================================
+SECTION 5: LINUX NAT IMPLEMENTATION
+================================================================================
+
+Linux uses:
+- iptables / nftables
+- conntrack subsystem
+
+----------------------------------------
+ENABLE IP FORWARDING
+----------------------------------------
+
+        echo 1 > /proc/sys/net/ipv4/ip_forward
+
+----------------------------------------
+DYNAMIC NAT (MASQUERADE)
+----------------------------------------
+
+        iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+This:
+- Rewrites source IP to public IP
+- Allocates port automatically
+- Creates conntrack entry
+- Handles timeout automatically
+
+View NAT table:
+
+        conntrack -L
+
+----------------------------------------
+STATIC NAT
+----------------------------------------
+
+Incoming:
+        iptables -t nat -A PREROUTING -d 49.x.x.x \
+                 -j DNAT --to-destination 192.168.1.10
+
+Outgoing:
+        iptables -t nat -A POSTROUTING -s 192.168.1.10 \
+                 -j SNAT --to-source 49.x.x.x
+
+================================================================================
+SECTION 6: DPDK NAT IMPLEMENTATION
+================================================================================
+
+IMPORTANT:
+DPDK provides NO automatic NAT.
+You must implement everything manually.
+
+You must:
+
+1) Parse Ethernet header
+2) Parse IPv4 header
+3) Parse TCP/UDP header
+4) Maintain NAT hash table
+5) Rewrite IP and port
+6) Recalculate checksums
+7) Handle timeout cleanup
+8) Handle multicore safety
+
+================================================================================
+SECTION 7: STATIC NAT IN DPDK
+================================================================================
+
+Logic:
+
+WAN → LAN:
+    if (dst_ip == PUBLIC_IP)
+        dst_ip = PRIVATE_IP
+
+LAN → WAN:
+    if (src_ip == PRIVATE_IP)
+        src_ip = PUBLIC_IP
+
+Then:
+    Recalculate IP checksum
+
+No state table needed for simple 1:1 mapping.
+
+================================================================================
+SECTION 8: DYNAMIC NAT (PAT) IN DPDK
+================================================================================
+
+You need NAT TABLE.
+
+----------------------------------------
+NAT TABLE STRUCTURE
+----------------------------------------
+
+Key:
+    private_ip
+    private_port
+    protocol
+
+Value:
+    public_ip
+    public_port
+    last_seen_timestamp
+
+Reverse lookup also required.
+
+----------------------------------------
+OUTGOING FLOW
+----------------------------------------
+
+1) Parse packet
+2) Lookup NAT entry
+3) If not found:
+       Allocate public port
+       Create NAT entry
+4) Rewrite:
+       ip->src = PUBLIC_IP
+       tcp->src_port = allocated_port
+5) Recalculate checksum
+6) Send to WAN
+
+----------------------------------------
+INCOMING FLOW
+----------------------------------------
+
+1) Lookup using:
+       dst_ip + dst_port
+2) Find mapping
+3) Rewrite:
+       ip->dst = private_ip
+       tcp->dst_port = private_port
+4) Recalculate checksum
+5) Forward to LAN
+
+================================================================================
+SECTION 9: CHECKSUM RECALCULATION
+================================================================================
+
+After modifying headers:
+
+    ip->hdr_checksum = 0;
+    ip->hdr_checksum = rte_ipv4_cksum(ip);
+
+    tcp->cksum = 0;
+    tcp->cksum = rte_ipv4_udptcp_cksum(ip, tcp);
+
+Mandatory step.
+
+================================================================================
+SECTION 10: TIMEOUT HANDLING
+================================================================================
+
+DPDK does NOT auto-clean entries.
+
+You must:
+- Periodically scan NAT table
+- Remove entries older than timeout
+
+Example:
+TCP established: 5 minutes
+UDP: 30 seconds
+
+================================================================================
+SECTION 11: MULTICORE DESIGN
+================================================================================
+
+Options:
+
+1) Shared hash + lock
+2) RCU
+3) Per-core NAT table (best)
+
+Best practice:
+Use RSS so same flow goes to same core.
+Then use per-core NAT table.
+No locking needed.
+
+================================================================================
+FINAL CORE UNDERSTANDING
+================================================================================
+
+- Port number is logical.
+- Stored in TCP/UDP header.
+- OS assigns ephemeral ports for outgoing connections.
+- NAT modifies IP and possibly port.
+- Linux does everything automatically via conntrack.
+- In DPDK, YOU build the NAT engine yourself.
+- Multicore design is critical for performance.
+
+================================================================================
+END OF NOTES
+================================================================================
+

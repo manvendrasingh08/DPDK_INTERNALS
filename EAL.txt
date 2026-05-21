@@ -1,0 +1,38 @@
+1. Environment Abstraction Layer (EAL) Library
+--------------------------------------------------
+The Environment Abstraction Layer (EAL) is responsible for gaining access to low-level resources such as hardware and memory space. It provides a generic interface that hides the environment specifics from the applications and libraries. 
+The EAL performs physical memory allocation using mmap() in hugetlbfs (using huge page sizes to increase performance). This memory is exposed to DPDK service layers such as the Memory Pool Library.
+
+At this point, the DPDK services layer will be initialized, then through pthread setaffinity calls (pthread_setaffinity_np()), each execution unit will be assigned to a specific logical core to run as a user-level thread.
+
+ EAL pthread and lcore Affinity
+ ----------------------------------
+ 
+The term “lcore” refers to an EAL thread, which is really a Linux/FreeBSD pthread. “EAL pthreads” are created and managed by EAL and execute the tasks issued by remote_launch. In each EAL pthread, there is a TLS (Thread Local Storage) called _lcore_id for unique identification. As EAL pthreads usually bind 1:1 to the physical CPU, the _lcore_id is typically equal to the CPU ID.
+
+When using multiple pthreads, however, the binding is no longer always 1:1 between an EAL pthread and a specified physical CPU. The EAL pthread may have affinity to a CPU set
+
+
+
+
+EAL Initialization: Exact Internal Flow
+--------------------------------------------
+
+High-level sequence:
+
+rte_eal_init()
+ ├─ parse_eal_args()
+ ├─ check_permissions()
+ ├─ detect_cpu()
+ ├─ init_log()
+ ├─ init_hugepages()
+ ├─ init_mem_config()
+ ├─ init_lcores()
+ ├─ init_threading()
+ ├─ init_timer()
+ ├─ init_pci()
+ ├─ init_devices()
+ └─ launch_secondary_cores()
+ 
+ The memory allocated during ***rte_eal_init()*** can be released by calling the ***rte_eal_cleanup()*** function.
+

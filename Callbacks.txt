@@ -1,0 +1,107 @@
+RX CALLBACK FUNCTION — SYNTAX
+=================================
+
+Exact prototype (must match this)
+	
+			uint16_t rx_callback_fn(
+					uint16_t port_id,
+					uint16_t queue_id,
+					struct rte_mbuf **pkts,
+					uint16_t nb_pkts,
+					uint16_t max_pkts,
+					void *user_param
+			);
+		
+		
+		
+REGISTERING THE RX CALLBACK — SYNTAX
+========================================
+				
+		struct rte_eth_rxtx_callback *rte_eth_add_rx_callback(
+			uint16_t port_id,
+			uint16_t queue_id,         // -1  to use all queues(if supported by PMD)
+			rte_rx_callback_fn fn,
+			void *user_param
+		);
+		
+	returns a rte_eth_rxtx_callback* type. which later used tp remove the callback
+	
+	Callbacks will be called in the order which they are registered.
+	
+	
+Removing the callback (important)
+==================================
+
+		rte_eth_remove_rx_callback(
+			port_id,
+			queue_id,
+			callback_handle
+		);
+		
+		
+/* ===================== TX CALLBACK FUNCTION ===================== */
+
+/*
+ * TX callback prototype (MUST match exactly)
+ */
+uint16_t tx_callback_fn(
+    uint16_t port_id,              /* Ethernet port ID */
+    uint16_t queue_id,             /* TX queue ID */
+    struct rte_mbuf **pkts,         /* Array of packets to be transmitted */
+    uint16_t nb_pkts,               /* Number of packets in this burst */
+    void *user_param                /* User-defined data */
+)
+{
+    uint16_t keep = 0;
+
+    for (uint16_t i = 0; i < nb_pkts; i++) {
+        struct rte_mbuf *m = pkts[i];
+
+        /* Example: allow all packets (or modify headers here) */
+        pkts[keep++] = m;
+    }
+
+    /* Return number of packets to actually transmit */
+    return keep;
+}
+
+
+/* ===================== REGISTER TX CALLBACK ===================== */
+
+/*
+ * Syntax to register TX callback
+ */
+struct rte_eth_rxtx_callback *tx_cb_handle;
+
+tx_cb_handle = rte_eth_add_tx_callback(
+    port_id,        /* Ethernet port */
+    queue_id,       /* TX queue */
+    tx_callback_fn, /* Callback function pointer */
+    user_param      /* Passed as-is to callback */
+);
+
+
+/* ===================== TX BURST (callback runs INSIDE this) ===================== */
+
+nb_tx = rte_eth_tx_burst(
+    port_id,
+    queue_id,
+    pkts,
+    nb_pkts
+);
+
+
+/* ===================== REMOVE TX CALLBACK ===================== */
+
+/*
+ * Syntax to remove TX callback
+ */
+rte_eth_remove_tx_callback(
+    port_id,        /* Ethernet port */
+    queue_id,       /* TX queue */
+    tx_cb_handle    /* Handle returned during registration */
+);
+
+
+
+
